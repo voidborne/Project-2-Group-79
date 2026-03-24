@@ -1,3 +1,5 @@
+// Project2.cpp
+// main program file
 #include <iostream>
 #include <vector>
 #include <string>
@@ -5,25 +7,14 @@
 #include <sstream>
 #include <chrono>
 #include <iomanip>
+#include <unordered_map>
+#include "shared_types.h"
+#include "QuadProbing.h"
+#include "logger.h"
+#include "tester.h"
+#include "anomaly.h"
 
 using namespace std;
-
-
-struct LapRecord 
-{
-    int raceId;
-    int driverId;
-    int lap;
-    int milliseconds;
-    bool isOccupied = false;
-
-    // using comp key to make it easier to hash (turns ids into single index)
-    
-    long long getCompositeKey() const 
-    {
-        return (long long)raceId * 1000000 + (long long)driverId * 1000 + lap;
-    }
-};
 
 class HashTable 
 {
@@ -117,6 +108,8 @@ vector<LapRecord> parseCSV(string filename)
         getline(ss, temp, ','); r.raceId = stoi(temp);
         getline(ss, temp, ','); r.driverId = stoi(temp);
         getline(ss, temp, ','); r.lap = stoi(temp);
+        getline(ss, temp, ',');
+        getline(ss, temp, ',');
         getline(ss, temp, ','); r.milliseconds = stoi(temp);
 
         data.push_back(r);
@@ -126,71 +119,271 @@ vector<LapRecord> parseCSV(string filename)
 }
 
 // 5. ui and benchmark
-void runBenchmark(const vector<LapRecord>& rawData, double loadFactor) 
+// changed this to also do quadratic probing and return BenchmarkResult instead of just printing
+BenchmarkResult runBenchmark(const vector<LapRecord>& rawData, double loadFactor)
 {
     int tableSize = (int)(rawData.size() / loadFactor);
-    HashTable lpTable(tableSize);
+
+    // storeing everything in here so we can print the table later
+    BenchmarkResult result;
+    result.loadFactorUsed = loadFactor;
+    result.tableSizeForRun = tableSize;
 
     cout << "\nLoad Factor: " << loadFactor << " (Capacity: " << tableSize << ")" << endl;
 
-    auto start = chrono::high_resolution_clock::now();
-    for (const auto& record : rawData) 
-    {
+    // linear probing
+    HashTable lpTable(tableSize);
+    auto lpStart = chrono::high_resolution_clock::now();
+    for (const auto& record : rawData)
         lpTable.insertLinear(record);
-    }
-    auto end = chrono::high_resolution_clock::now();
-    auto duration = chrono::duration_cast<chrono::milliseconds>(end - start);
+    auto lpEnd = chrono::high_resolution_clock::now();
+    result.linearInsertTimeMs = chrono::duration_cast<chrono::milliseconds>(lpEnd - lpStart).count();
+    result.linearCollisions = lpTable.getCollisions();
 
-    cout << "Linear Probing - Collisions: " << lpTable.getCollisions() << endl;
-    cout << "Linear Probing - Insertion Time: " << duration.count() << "ms" << endl;
+    int sampleSize = (int)rawData.size();
+    if (sampleSize > 1000) sampleSize = 1000;
+
+    auto lpSearchStart = chrono::high_resolution_clock::now();
+    for (int i = 0; i < sampleSize; i++)
+        lpTable.searchLinear(rawData[i].raceId, rawData[i].driverId, rawData[i].lap);
+    auto lpSearchEnd = chrono::high_resolution_clock::now();
+    result.linearAvgSearchTimeUs =
+        (double)chrono::duration_cast<chrono::microseconds>(lpSearchEnd - lpSearchStart).count()
+        / sampleSize;
+
+    // quadratic probing
+    QuadHashTable qpTable(tableSize);
+    auto qpStart = chrono::high_resolution_clock::now();
+    for (const auto& record : rawData)
+        qpTable.putInTable(record);
+    auto qpEnd = chrono::high_resolution_clock::now();
+    result.quadInsertTimeMs = chrono::duration_cast<chrono::milliseconds>(qpEnd - qpStart).count();
+    result.quadCollisions = qpTable.getCollisionTotal();
+    auto qpSearchStart = chrono::high_resolution_clock::now();
+    for (int i = 0; i < sampleSize; i++)
+        qpTable.lookUpLap(rawData[i].raceId, rawData[i].driverId, rawData[i].lap);
+    auto qpSearchEnd = chrono::high_resolution_clock::now();
+    result.quadAvgSearchTimeUs =
+        (double)chrono::duration_cast<chrono::microseconds>(qpSearchEnd - qpSearchStart).count()
+        / sampleSize;
+    cout << "  Linear  - Collisions: " << result.linearCollisions
+         << "  Insert: " << result.linearInsertTimeMs << "ms"
+         << "  Avg Search: " << fixed << setprecision(3) << result.linearAvgSearchTimeUs << "us" << endl;
+    cout << "  Quad    - Collisions: " << result.quadCollisions
+         << "  Insert: " << result.quadInsertTimeMs << "ms"
+         << "  Avg Search: " << fixed << setprecision(3) << result.quadAvgSearchTimeUs << "us" << endl;
     cout << "------------------------------------------" << endl;
+    return result;
 }
 
-int main() 
+// prints the comparison table from all the benchmark runs
+// took me awhile to get the setw stuff right so the columns line up
+void printResultsTable(const vector<BenchmarkResult>& allResults)
+{
+    cout << "\n========================================================================================================================" << endl;
+    cout << "                                      BENCHMARK RESULTS - Linear vs Quadratic Probing" << endl;
+    cout << "========================================================================================================================" << endl;
+
+    // header row
+    cout << left
+         << setw(8)  << "Load"
+         << setw(12) << "Capacity"
+         << setw(20) << "Linear Collisions"
+         << setw(19) << "Linear Insert(ms)"
+         << setw(22) << "Linear AvgSearch(us)"
+         << setw(20) << "Quad Collisions"
+         << setw(18) << "Quad Insert(ms)"
+         << setw(20) << "Quad AvgSearch(us)"
+         << endl;
+    cout << "------------------------------------------------------------------------------------------------------------------------" << endl;
+
+    // a row for each load factor and aligned with the header
+    for (const auto& r : allResults)
+    {
+        cout << left  << setw(8)  << fixed << setprecision(1) << r.loadFactorUsed
+             << right << setw(10) << r.tableSizeForRun
+             << right << setw(18) << r.linearCollisions
+             << right << setw(17) << r.linearInsertTimeMs
+             << right << setw(20) << setprecision(3) << r.linearAvgSearchTimeUs
+             << right << setw(18) << r.quadCollisions
+             << right << setw(16) << r.quadInsertTimeMs
+             << right << setw(20) << r.quadAvgSearchTimeUs
+             << endl;
+    }
+    cout << "========================================================================================================================\n" << endl;
+}
+
+int main()
 {
     vector<LapRecord> rawData;
+    vector<BenchmarkResult> savedResults;
+    unordered_map<int, double> driverAvgs;
     int choice;
+    RunLogger appLog("run_log.txt");
 
-    while (true) 
+    while (true)
     {
         cout << "\n==========================================" << endl;
         cout << "    F1 Anomaly Detection" << endl;
         cout << "==========================================" << endl;
         cout << "1. Load F1 Dataset (lap_times.csv)" << endl;
-        cout << "2. Run Benchmarks (0.5 to 0.9 Load)" << endl;
-        cout << "3. Check Lap for Anomaly (Manual Search)" << endl;
-        cout << "4. Exit" << endl;
+        cout << "2. Run Benchmarks (Linear vs Quadratic)" << endl;
+        cout << "3. Search for a Specific Lap (+ Anomaly Check)" << endl;
+        cout << "4. Show Results Table" << endl;
+        cout << "5. Scan Driver for Flagged Laps" << endl;
+        cout << "6. Run Tests" << endl;
+        cout << "7. Exit" << endl;
         cout << "Selection: ";
-        cin >> choice;
-
-        if (choice == 1) 
+        if (!(cin >> choice))
         {
-            cout << "Loading data..." << endl;
+            cin.clear();
+            cin.ignore(10000, '\n');
+            continue;
+        }
+
+        if (choice == 1)
+        {
+            appLog.write("Loading data...");
             rawData = parseCSV("lap_times.csv");
             cout << "Successfully loaded " << rawData.size() << " records." << endl;
-        } 
-        else if (choice == 2) 
+            appLog.writeLabeled("Records loaded", (long long)rawData.size());
+            driverAvgs = buildDriverAverages(rawData);
+            cout << "Computed averages for " << driverAvgs.size() << " drivers." << endl;
+        }
+        else if (choice == 2)
         {
-            if (rawData.empty()) 
-            { 
-                cout << "Load data first." << endl; continue; 
+            if (rawData.empty())
+            {
+                cout << "Load data first." << endl; continue;
             }
 
+            savedResults.clear();
+            appLog.write("Starting benchmarks...");
+
             double factors[] = {0.5, 0.6, 0.7, 0.8, 0.9};
-            for (double f : factors) 
+            for (double f : factors)
             {
-                runBenchmark(rawData, f);
+                BenchmarkResult oneRun = runBenchmark(rawData, f);
+                savedResults.push_back(oneRun);
+
+                // log the collision numbers for each run
+                appLog.writeLabeled("  load factor", f);
+                appLog.writeLabeled("    linear collisions", oneRun.linearCollisions);
+                appLog.writeLabeled("    quad collisions", oneRun.quadCollisions);
+            }
+            cout << "\nDone. Use option 4 to see the full table." << endl;
+        }
+        else if (choice == 3)
+        {
+            if (rawData.empty())
+            {
+                cout << "Load data first." << endl; continue;
+            }
+
+            int r, d, l;
+            cout << "Enter Race ID, Driver ID, and Lap Number (3 numbers separated by spaces): ";
+            if (!(cin >> r >> d >> l))
+            {
+                // check to see if they entered anything
+                cin.clear();
+                cin.ignore(10000, '\n');
+                cout << "Need all 3 numbers" << endl;
+                continue;
+            }
+
+            // search logic here
+            int searchTableSize = (int)(rawData.size() / 0.7);
+            HashTable searchLP(searchTableSize);
+            QuadHashTable searchQP(searchTableSize);
+            for (const auto& rec : rawData)
+            {
+                searchLP.insertLinear(rec);
+                searchQP.putInTable(rec);
+            }
+            int lpTime = searchLP.searchLinear(r, d, l);
+            int qpTime = searchQP.lookUpLap(r, d, l);
+            if (lpTime == -1 && qpTime == -1)
+            {
+                cout << "Lap not found." << endl;
+            }
+            else
+            {
+                int lapTime = (lpTime != -1) ? lpTime : qpTime;
+                cout << "\n  Lap time:     " << lapTime << " ms (" << fixed << setprecision(3) << lapTime / 1000.0 << " s)" << endl;
+                cout << "  Found by linear: " << (lpTime != -1 ? "yes" : "no") << "  |  Found by quad: " << (qpTime != -1 ? "yes" : "no") << endl;
+
+                // compare this lap against the driver's average.
+                if (!driverAvgs.empty())
+                {
+                    AnomalyResult anomaly = checkLapAnomaly(lapTime, d, driverAvgs);
+                    printAnomalyInfo(anomaly, lapTime, driverAvgs.at(d));
+                }
+                else
+                {
+                    cout << "  (load dataset first for anomaly info)" << endl;
+                }
             }
         }
-        else if (choice == 3) 
+        else if (choice == 4)
         {
-            
-            int r, d, l;
-            cout << "Enter Race ID, Driver ID, and Lap Number: ";
-            cin >> r >> d >> l;
-            // search logic here
+            if (savedResults.empty())
+                cout << "Run the benchmark first with option 2." << endl;
+            else
+                printResultsTable(savedResults);
         }
-        else if (choice == 4) break;
+        else if (choice == 5)
+        {
+            if (rawData.empty())
+            {
+                cout << "Load data first." << endl; continue;
+            }
+            int driverId;
+            cout << "Enter Driver ID: ";
+            if (!(cin >> driverId))
+            {
+                cin.clear();
+                cin.ignore(10000, '\n');
+                cout << "Invalid input." << endl;
+                continue;
+            }
+
+            // find all laps for this driver that are not normal
+            vector<LapRecord> flaggedLaps = findFlaggedLapsForDriver(driverId, rawData, driverAvgs);
+            if (flaggedLaps.empty())
+            {
+                cout << "There are no flagged laps for the driver " << driverId << "." << endl;
+            }
+            else
+            {
+                cout << "\nFlagged laps for driver " << driverId
+                     << " (avg: " << fixed << setprecision(0)
+                     << driverAvgs.at(driverId) << " ms):" << endl;
+                cout << left << setw(10) << "Race"
+                     << setw(8)  << "Lap"
+                     << setw(14) << "Time(ms)"
+                     << setw(10) << "Deviation"
+                     << "Status" << endl;
+                cout << "----------------------------------------------------" << endl;
+
+                for (const auto& rec : flaggedLaps)
+                {
+                    AnomalyResult a = checkLapAnomaly(rec.milliseconds, rec.driverId, driverAvgs);
+                    cout << left  << setw(10) << rec.raceId
+                         << setw(8)  << rec.lap
+                         << setw(14) << rec.milliseconds
+                         << right << setw(8) << showpos << fixed << setprecision(1)
+                         << (a.pctDeviation * 100.0) << "%" << noshowpos
+                         << "  " << a.label << endl;
+                }
+                cout << "\n" << flaggedLaps.size() << " flagged laps found." << endl;
+            }
+        }
+        else if (choice == 6)
+        {
+            runAllTests(rawData);
+        }
+        else if (choice == 7) break;
     }
     return 0;
 }
+// Project2.cpp
